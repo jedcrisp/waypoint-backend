@@ -18,7 +18,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define required columns for each test
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to Waypoint Backend API. Use the correct endpoint for testing."}
+
 TEST_COLUMN_REQUIREMENTS = {
     "adp": ["Name", "Compensation", "Employee Deferral", "HCE"],
     "acp": ["Name", "Compensation", "Employer Match", "HCE"],
@@ -36,7 +39,6 @@ TEST_COLUMN_REQUIREMENTS = {
     "hra_eligibility": ["Name", "HCI", "Eligible for HRA"],
 }
 
-# Dynamic CSV Upload Route
 @app.post("/upload-csv/{test_type}")
 async def upload_csv(test_type: str, file: UploadFile = File(...)):
     if test_type not in TEST_COLUMN_REQUIREMENTS:
@@ -44,40 +46,65 @@ async def upload_csv(test_type: str, file: UploadFile = File(...)):
     try:
         contents = await file.read()
         df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
+        
         # Validate required columns
         required_columns = TEST_COLUMN_REQUIREMENTS[test_type]
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             raise HTTPException(status_code=400, detail=f"Missing columns: {missing_columns}")
+        
         # Run the appropriate test logic
         result = run_test(df, test_type)
         return {"Test Type": test_type, "Result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
-# Function to Run Different Tests
 def run_test(df, test_type):
     try:
-        # ADP TEST
+        # ------------------ ADP TEST ------------------
         if test_type == "adp":
+            # Separate groups by HCE status
             hce_group = df[df["HCE"] == "Yes"]
             nhce_group = df[df["HCE"] == "No"]
-            hce_adp = (
-                (hce_group["Employee Deferral"].sum() / hce_group["Compensation"].sum()) * 100
-                if not hce_group.empty and hce_group["Compensation"].sum() > 0 else 0
-            )
-            nhce_adp = (
-                (nhce_group["Employee Deferral"].sum() / nhce_group["Compensation"].sum()) * 100
-                if not nhce_group.empty and nhce_group["Compensation"].sum() > 0 else 0
-            )
+
+            # Compute sums for HCE group
+            hce_deferral_sum = hce_group["Employee Deferral"].sum() if not hce_group.empty else 0
+            hce_comp_sum = hce_group["Compensation"].sum() if not hce_group.empty else 0
+
+            # Compute sums for NHCE group
+            nhce_deferral_sum = nhce_group["Employee Deferral"].sum() if not nhce_group.empty else 0
+            nhce_comp_sum = nhce_group["Compensation"].sum() if not nhce_group.empty else 0
+
+            # Calculate ADP percentages:
+            #   HCE ADP (%) = (Sum of HCE Employee Deferral / Sum of HCE Compensation) × 100
+            hce_adp = (hce_deferral_sum / hce_comp_sum * 100) if hce_comp_sum > 0 else 0
+
+            #   NHCE ADP (%) = (Sum of NHCE Employee Deferral / Sum of NHCE Compensation) × 100
+            nhce_adp = (nhce_deferral_sum / nhce_comp_sum * 100) if nhce_comp_sum > 0 else 0
+
+            # Determine test result: Pass if HCE ADP <= 1.25 × NHCE ADP
             test_result = "Passed" if hce_adp <= (nhce_adp * 1.25) else "Failed"
+
+            # Return result with a math breakdown (convert to Python int for JSON compatibility)
             return {
                 "HCE ADP (%)": round(hce_adp, 2),
                 "NHCE ADP (%)": round(nhce_adp, 2),
-                "Test Result": test_result
+                "Test Result": test_result,
+                "Breakdown": {
+                    "HCE Deferral Sum": int(hce_deferral_sum),
+                    "HCE Compensation Sum": int(hce_comp_sum),
+                    "NHCE Deferral Sum": int(nhce_deferral_sum),
+                    "NHCE Compensation Sum": int(nhce_comp_sum),
+                    "HCE ADP": round(hce_adp, 2),
+                    "NHCE ADP": round(nhce_adp, 2),
+                    "1.25 * NHCE ADP": round(nhce_adp * 1.25, 2),
+                    "Formula (HCE)": "HCE ADP = (HCE Deferral Sum / HCE Compensation Sum) × 100",
+                    "Formula (NHCE)": "NHCE ADP = (NHCE Deferral Sum / NHCE Compensation Sum) × 100",
+                    "Test Criterion": "HCE ADP ≤ 1.25 × NHCE ADP"
+                }
             }
 
-        # ACP TEST
+        # ------------------ ACP TEST ------------------
         if test_type == "acp":
             hce_group = df[df["HCE"] == "Yes"]
             nhce_group = df[df["HCE"] == "No"]
@@ -96,7 +123,7 @@ def run_test(df, test_type):
                 "ACP_Test_Result": acp_test_result
             }
         
-        # Key Employee Test
+        # ------------------ KEY EMPLOYEE TEST ------------------
         if test_type == "key_employee":
             total_employees = len(df)
             key_employees = df[df["Key Employee"] == "Yes"].shape[0]
@@ -109,7 +136,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # Eligibility Test (using HCE as an example)
+        # ------------------ ELIGIBILITY TEST ------------------
         if test_type == "eligibility":
             total_employees = len(df)
             hce_count = df[df["HCE"] == "Yes"].shape[0]
@@ -122,7 +149,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # Classification Test
+        # ------------------ CLASSIFICATION TEST ------------------
         if test_type == "classification":
             total_employees = len(df)
             eligible = df[df["Eligible for Cafeteria Plan"] == "Yes"].shape[0]
@@ -135,7 +162,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # Benefit Test (Cafeteria Plan Benefits)
+        # ------------------ BENEFIT TEST (CAFETERIA PLAN) ------------------
         if test_type == "benefit":
             hce_group = df[df["HCE"] == "Yes"]
             nhce_group = df[df["HCE"] == "No"]
@@ -152,7 +179,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # Health FSA Eligibility Test
+        # ------------------ HEALTH FSA ELIGIBILITY TEST ------------------
         if test_type == "health_fsa_eligibility":
             total_employees = len(df)
             eligible = df[df["Eligible for FSA"] == "Yes"].shape[0]
@@ -165,7 +192,7 @@ def run_test(df, test_type):
                 "Health FSA Eligibility Test Result": test_result
             }
         
-        # Health FSA Benefits Test
+        # ------------------ HEALTH FSA BENEFITS TEST ------------------
         if test_type == "health_fsa_benefits":
             hci_group = df[df["HCI"] == "Yes"]
             non_hci_group = df[df["HCI"] == "No"]
@@ -182,7 +209,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # DCAP Eligibility Test
+        # ------------------ DCAP ELIGIBILITY TEST ------------------
         if test_type == "dcap_eligibility":
             total_employees = len(df)
             eligible_employees = df[df["Eligible for DCAP"] == "Yes"].shape[0]
@@ -195,7 +222,7 @@ def run_test(df, test_type):
                 "DCAP Eligibility Test Result": test_result
             }
         
-        # DCAP Owners Test
+        # ------------------ DCAP OWNERS TEST ------------------
         if test_type == "dcap_owners":
             owners = df[df["Ownership %"] > 0]
             if owners.empty:
@@ -207,7 +234,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # DCAP 55% Benefits Test
+        # ------------------ DCAP 55% BENEFITS TEST ------------------
         if test_type == "dcap_55_benefits":
             hce_group = df[df["HCE"] == "Yes"]
             nhce_group = df[df["HCE"] == "No"]
@@ -224,7 +251,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # DCAP Contributions Test
+        # ------------------ DCAP CONTRIBUTIONS TEST ------------------
         if test_type == "dcap_contributions":
             hce_group = df[df["HCE"] == "Yes"]
             nhce_group = df[df["HCE"] == "No"]
@@ -239,7 +266,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # HRA Eligibility Test
+        # ------------------ HRA ELIGIBILITY TEST ------------------
         if test_type == "hra_eligibility":
             hce_group = df[df["HCE"] == "Yes"]
             nhce_group = df[df["HCE"] == "No"]
@@ -256,7 +283,7 @@ def run_test(df, test_type):
                 "Test Result": test_result
             }
         
-        # HRA Benefits Test
+        # ------------------ HRA BENEFITS TEST ------------------
         if test_type == "hra_benefits":
             hce_group = df[df["HCE"] == "Yes"]
             nhce_group = df[df["HCE"] == "No"]
@@ -273,3 +300,5 @@ def run_test(df, test_type):
     except Exception as e:
         return {"error": f"Test execution error: {str(e)}"}
 
+if __name__ == "__main__":
+    app.run(debug=True)
